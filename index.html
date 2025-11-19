@@ -3,11 +3,11 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
-    <title>Labubu AR (最终版)</title>
+    <title>Labubu AR (双摄版)</title>
     <style>
         body { margin: 0; padding: 0; overflow: hidden; background-color: #000; font-family: sans-serif; }
-        #input-video { position: absolute; top: 0; left: 0; width: 100%; height: 100%; object-fit: cover; z-index: 1; }
-        #output-canvas { position: absolute; top: 0; left: 0; width: 100%; height: 100%; z-index: 2; pointer-events: none; }
+        #input-video { position: absolute; top: 0; left: 0; width: 100%; height: 100%; object-fit: cover; z-index: 1; transform: scaleX(-1); /* 默认前置镜像 */ }
+        #output-canvas { position: absolute; top: 0; left: 0; width: 100%; height: 100%; z-index: 2; pointer-events: none; transform: scaleX(-1); /* 默认前置镜像 */ }
         
         /* 遮罩层 */
         #overlay {
@@ -17,7 +17,7 @@
             color: white; transition: opacity 0.5s;
         }
 
-        /* 按钮 */
+        /* 开始按钮 */
         #start-btn {
             padding: 15px 40px; font-size: 18px; background: #00C853; color: white;
             border: none; border-radius: 30px; font-weight: bold; cursor: pointer;
@@ -25,11 +25,21 @@
         }
         #start-btn:disabled { background: #555; color: #888; box-shadow: none; }
 
+        /* 切换摄像头按钮 (默认隐藏，启动后显示) */
+        #switch-btn {
+            position: absolute; top: 20px; right: 20px; z-index: 99;
+            background: rgba(255, 255, 255, 0.3); color: white;
+            border: 1px solid rgba(255,255,255,0.5);
+            padding: 8px 15px; border-radius: 20px;
+            font-size: 14px; backdrop-filter: blur(5px);
+            display: none; cursor: pointer;
+        }
+
         /* 调试日志 */
         #debug-log {
-            position: absolute; bottom: 0; left: 0; width: 100%; height: 120px;
-            background: linear-gradient(to top, rgba(0,0,0,0.9), rgba(0,0,0,0)); 
-            color: #00ff00; font-size: 11px; padding: 10px; 
+            position: absolute; bottom: 0; left: 0; width: 100%; height: 100px;
+            background: linear-gradient(to top, rgba(0,0,0,0.8), rgba(0,0,0,0)); 
+            color: #00ff00; font-size: 10px; padding: 10px; 
             overflow-y: scroll; z-index: 101; pointer-events: none;
             font-family: monospace;
         }
@@ -37,11 +47,12 @@
     
     <script src="https://unpkg.com/three@0.128.0/build/three.min.js"></script>
     <script src="https://unpkg.com/three@0.128.0/examples/js/loaders/GLTFLoader.js"></script>
-    
     <script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js"></script>
 </head>
 <body>
+
+    <button id="switch-btn">📷 切换摄像头</button>
 
     <div id="overlay">
         <h1>👋 Labubu AR</h1>
@@ -54,7 +65,7 @@
     <canvas id="output-canvas"></canvas>
 
     <script>
-        // 日志工具
+        // --- 日志 ---
         function log(msg) {
             const logDiv = document.getElementById('debug-log');
             const time = new Date().toTimeString().split(' ')[0];
@@ -62,141 +73,165 @@
             console.log(msg);
         }
 
-        // 全局变量
+        // --- 全局变量 ---
         let scene, camera, renderer, labubuGroup;
         let hands, cameraUtils;
-        const startBtn = document.getElementById('start-btn');
-        const statusDiv = document.getElementById('loading-status');
+        let isFrontCamera = true; // 默认前置
+        let isRunning = false;
 
-        // --- 1. 资源检查 (页面加载时自动执行) ---
+        const startBtn = document.getElementById('start-btn');
+        const switchBtn = document.getElementById('switch-btn');
+        const statusDiv = document.getElementById('loading-status');
+        const videoElement = document.getElementById('input-video');
+        const canvasElement = document.getElementById('output-canvas');
+
+        // --- 1. 页面加载 ---
         window.onload = function() {
-            log("页面加载完成，检查依赖库...");
-            
-            // 检查 Three.js 是否成功下载
-            if (typeof THREE === 'undefined') {
-                log("❌ 致命错误: Three.js 引擎下载失败！");
-                statusDiv.innerText = "网络错误：引擎文件下载失败，请刷新重试";
+            if (typeof THREE === 'undefined' || typeof Hands === 'undefined') {
+                statusDiv.innerText = "网络波动，建议刷新重试";
                 statusDiv.style.color = "red";
+                log("❌ 依赖库加载失败");
                 return;
             }
-
-            // 检查 MediaPipe
-            if (typeof Hands === 'undefined') {
-                log("⚠️ 警告: AI 库可能未完全加载，稍后重试...");
-            }
-
-            log("✅ 3D 引擎就绪。");
             startBtn.disabled = false;
             startBtn.innerText = "点击开始体验";
             statusDiv.innerText = "准备就绪";
         };
 
-        // --- 2. 核心初始化逻辑 ---
-        function startApp() {
-            // 防止重复点击
+        // --- 2. 启动程序 ---
+        async function startApp() {
             startBtn.disabled = true;
-            statusDiv.innerText = "正在启动摄像头与AI...";
+            statusDiv.innerText = "启动引擎中...";
 
             try {
-                // A. 初始化 3D 场景
-                log("初始化 3D 场景...");
-                scene = new THREE.Scene();
-                camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 1000);
-                camera.position.z = 5;
+                initThreeJS();
+                initMediaPipe();
+                await startCamera('user'); // 默认启动前置
 
-                renderer = new THREE.WebGLRenderer({ canvas: document.getElementById('output-canvas'), alpha: true, antialias: true });
-                renderer.setSize(window.innerWidth, window.innerHeight);
-                renderer.setPixelRatio(window.devicePixelRatio);
-
-                // 灯光
-                scene.add(new THREE.AmbientLight(0xffffff, 0.8));
-                const dirLight = new THREE.DirectionalLight(0xffffff, 1);
-                dirLight.position.set(5, 10, 7);
-                scene.add(dirLight);
-
-                // 模型容器
-                labubuGroup = new THREE.Group();
-                scene.add(labubuGroup);
-
-                // >>> 红色测试方块 (如果不想用，请注释掉) <<<
-                const geometry = new THREE.BoxGeometry(1.5, 1.5, 1.5);
-                const material = new THREE.MeshNormalMaterial(); // 彩色材质，更容易看清
-                const cube = new THREE.Mesh(geometry, material);
-                labubuGroup.add(cube);
-                labubuGroup.visible = false; // 默认隐藏
-                // >>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>
-
-                /* // >>> 如果你有 labubu.glb，取消注释这段代码 <<<
-                const loader = new THREE.GLTFLoader();
-                loader.load('./labubu.glb', (gltf) => {
-                    labubuGroup.clear(); // 清除方块
-                    const model = gltf.scene;
-                    model.scale.set(0.5, 0.5, 0.5); // 缩放
-                    labubuGroup.add(model);
-                    log("✅ 模型文件加载成功");
-                }, undefined, (err) => {
-                    log("❌ 模型加载失败: " + err);
-                });
-                */
-
-                // B. 初始化 AI 手部识别
-                log("启动 AI 识别...");
-                hands = new Hands({locateFile: (file) => {
-                    return `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${file}`;
-                }});
-                
-                hands.setOptions({
-                    maxNumHands: 1,
-                    modelComplexity: 1,
-                    minDetectionConfidence: 0.5,
-                    minTrackingConfidence: 0.5
-                });
-
-                hands.onResults(onResults);
-
-                // C. 启动摄像头
-                const videoElement = document.getElementById('input-video');
-                cameraUtils = new Camera(videoElement, {
-                    onFrame: async () => {
-                        await hands.send({image: videoElement});
-                    },
-                    width: 1280,
-                    height: 720
-                });
-                
-                cameraUtils.start()
-                    .then(() => {
-                        log("✅ 摄像头已启动！");
-                        statusDiv.innerText = "请将手掌伸到镜头前...";
-                    })
-                    .catch(err => {
-                        log("❌ 摄像头被拒绝: " + err);
-                        alert("无法调用摄像头，请确保允许权限。");
-                        startBtn.disabled = false;
-                    });
+                // 启动成功后
+                document.getElementById('overlay').style.display = 'none';
+                switchBtn.style.display = 'block'; // 显示切换按钮
+                isRunning = true;
 
             } catch (e) {
-                log("❌ 运行报错: " + e.message);
+                log("❌ 启动报错: " + e.message);
+                statusDiv.innerText = "启动失败，请查看日志";
                 startBtn.disabled = false;
             }
         }
 
-        // --- 3. 每一帧的处理 ---
-        function onResults(results) {
-            // 隐藏遮罩
-            const overlay = document.getElementById('overlay');
-            if (overlay.style.opacity !== '0') {
-                overlay.style.opacity = '0';
-                setTimeout(() => overlay.style.display = 'none', 500);
+        // --- 3. Three.js 3D 初始化 ---
+        function initThreeJS() {
+            log("初始化 3D...");
+            scene = new THREE.Scene();
+            camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 1000);
+            camera.position.z = 5;
+
+            renderer = new THREE.WebGLRenderer({ canvas: canvasElement, alpha: true, antialias: true });
+            renderer.setSize(window.innerWidth, window.innerHeight);
+            renderer.setPixelRatio(window.devicePixelRatio);
+
+            scene.add(new THREE.AmbientLight(0xffffff, 0.8));
+            const dirLight = new THREE.DirectionalLight(0xffffff, 1);
+            dirLight.position.set(5, 10, 7);
+            scene.add(dirLight);
+
+            labubuGroup = new THREE.Group();
+            scene.add(labubuGroup);
+
+            // >>> 占位模型 (旋转方块) <<<
+            const geometry = new THREE.BoxGeometry(1.5, 1.5, 1.5);
+            const material = new THREE.MeshNormalMaterial(); 
+            const cube = new THREE.Mesh(geometry, material);
+            labubuGroup.add(cube);
+            labubuGroup.visible = false;
+
+            /* // >>> Labubu 模型加载代码 (取消注释使用) <<<
+            const loader = new THREE.GLTFLoader();
+            loader.load('./labubu.glb', (gltf) => {
+                labubuGroup.clear();
+                const model = gltf.scene;
+                model.scale.set(0.5, 0.5, 0.5);
+                labubuGroup.add(model);
+                log("✅ 模型加载完毕");
+            }); */
+        }
+
+        // --- 4. AI 初始化 ---
+        function initMediaPipe() {
+            hands = new Hands({locateFile: (file) => `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${file}`});
+            hands.setOptions({
+                maxNumHands: 1,
+                modelComplexity: 1,
+                minDetectionConfidence: 0.5,
+                minTrackingConfidence: 0.5
+            });
+            hands.onResults(onResults);
+        }
+
+        // --- 5. 摄像头核心逻辑 (支持切换) ---
+        async function startCamera(facingMode) {
+            log(`正在启动摄像头: ${facingMode}...`);
+            
+            // 如果已有摄像头在运行，先停止
+            if (cameraUtils) {
+                await cameraUtils.stop();
             }
 
-            // 如果 ThreeJS 还没初始化好，直接跳过，防止报错
+            // 调整镜像 CSS：前置需要镜像翻转，后置不需要
+            if (facingMode === 'user') {
+                videoElement.style.transform = "scaleX(-1)";
+                canvasElement.style.transform = "scaleX(-1)";
+            } else {
+                videoElement.style.transform = "scaleX(1)";
+                canvasElement.style.transform = "scaleX(1)";
+            }
+
+            cameraUtils = new Camera(videoElement, {
+                onFrame: async () => {
+                    await hands.send({image: videoElement});
+                },
+                width: 1280,
+                height: 720,
+                facingMode: facingMode // 关键配置
+            });
+
+            await cameraUtils.start();
+            log("✅ 摄像头运行中");
+        }
+
+        // --- 6. 切换按钮逻辑 ---
+        switchBtn.addEventListener('click', async () => {
+            if (!isRunning) return;
+            
+            switchBtn.disabled = true;
+            switchBtn.innerText = "切换中...";
+            
+            // 切换模式
+            isFrontCamera = !isFrontCamera;
+            const mode = isFrontCamera ? 'user' : 'environment';
+            
+            try {
+                await startCamera(mode);
+            } catch (e) {
+                log("切换失败: " + e);
+                alert("切换摄像头失败，请刷新重试");
+            }
+            
+            switchBtn.disabled = false;
+            switchBtn.innerText = isFrontCamera ? "📷 切到后置" : "📷 切到前置";
+        });
+
+        // --- 7. 渲染循环 ---
+        function onResults(results) {
             if (!renderer || !labubuGroup) return;
 
-            // 识别逻辑
+            canvasCtx = canvasElement.getContext('2d');
+            canvasCtx.clearRect(0, 0, canvasElement.width, canvasElement.height);
+
             if (results.multiHandLandmarks && results.multiHandLandmarks.length > 0) {
                 const landmarks = results.multiHandLandmarks[0];
-                // 获取中指指根 (9)
+                // 中指根部
                 const palmX = landmarks[9].x; 
                 const palmY = landmarks[9].y;
                 
@@ -205,35 +240,32 @@
             } else {
                 labubuGroup.visible = false;
             }
-
             renderer.render(scene, camera);
         }
 
         function update3DPosition(x, y, landmarks) {
             const vec = new THREE.Vector3();
-            // 坐标转换
+            // 坐标映射
             vec.set((x * 2) - 1, -(y * 2) + 1, 0.5);
             vec.unproject(camera);
             vec.sub(camera.position).normalize();
             
-            // 距离估算
+            // 简单的深度估算
             const dx = landmarks[0].x - landmarks[9].x;
             const dy = landmarks[0].y - landmarks[9].y;
             const dist = Math.sqrt(dx*dx + dy*dy);
-            const zDepth = 1 / (dist * 5); 
+            
+            // 后置摄像头通常手会比较小，调整一下深度系数
+            const depthFactor = isFrontCamera ? 5 : 8; 
+            const zDepth = 1 / (dist * depthFactor); 
             
             var dir = vec.multiplyScalar(zDepth);
             labubuGroup.position.copy(camera.position).add(dir);
-            
-            // 让模型稍微旋转动起来，增加趣味
-            labubuGroup.rotation.x += 0.01;
-            labubuGroup.rotation.y += 0.01;
+            labubuGroup.rotation.y += 0.01; // 旋转动画
         }
 
-        // 绑定按钮
         startBtn.addEventListener('click', startApp);
-
-        // 窗口适配
+        
         window.addEventListener('resize', () => {
             if(camera && renderer) {
                 camera.aspect = window.innerWidth / window.innerHeight;

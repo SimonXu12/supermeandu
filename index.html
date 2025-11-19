@@ -2,266 +2,355 @@
 <html lang="zh-CN">
 <head>
     <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
-    <title>Labubu AR (国内加速版)</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Labubu AR 体验 (整合版)</title>
+    
+    <script type="module" src="https://unpkg.com/@google/model-viewer/dist/model-viewer.min.js"></script>
+    <script src="https://cdn.staticfile.org/three.js/r128/three.min.js"></script>
+    <script src="https://cdn.bootcdn.net/ajax/libs/three.js/r128/examples/js/loaders/GLTFLoader.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js"></script>
+
     <style>
-        body { margin: 0; padding: 0; overflow: hidden; background-color: #000; font-family: sans-serif; }
-        #input-video { position: absolute; top: 0; left: 0; width: 100%; height: 100%; object-fit: cover; z-index: 1; transform: scaleX(-1); }
-        #output-canvas { position: absolute; top: 0; left: 0; width: 100%; height: 100%; z-index: 2; pointer-events: none; transform: scaleX(-1); }
-        
-        /* 遮罩层 */
-        #overlay {
+        body { margin: 0; padding: 0; width: 100vw; height: 100vh; overflow: hidden; font-family: sans-serif; }
+
+        /* --- 默认的 WebXR 模式 --- */
+        model-viewer {
+            width: 100%; height: 100%; position: absolute; top: 0; left: 0;
+            background-color: black; /* 确保背景是黑的，否则透明时显示的是页面底层 */
+            z-index: 10;
+        }
+        /* model-viewer 默认 AR 按钮 */
+        .ar-button {
+            background-color: #ff5959; border-radius: 25px; border: none;
+            color: white; position: absolute; bottom: 30px; left: 50%;
+            transform: translateX(-50%); padding: 15px 30px; font-size: 16px;
+            font-weight: bold; box-shadow: 0 4px 10px rgba(0,0,0,0.3);
+            cursor: pointer; display: none; /* 默认隐藏，有 AR 才显示 */
+        }
+        model-viewer[ar-status="session-started"] > .ar-button { display: none; } /* AR 启动后隐藏 */
+
+        /* --- 手掌跟随模式的 UI --- */
+        #hand-ar-container {
             position: absolute; top: 0; left: 0; width: 100%; height: 100%;
-            background: rgba(0,0,0,0.9); z-index: 100;
-            display: flex; flex-direction: column; align-items: center; justify-content: center;
-            color: white;
+            display: none; /* 默认隐藏 */
+            background-color: black;
+            z-index: 20; /* 比 model-viewer 高 */
         }
-
-        /* 按钮 */
-        #start-btn {
-            padding: 15px 40px; font-size: 18px; background: #00C853; color: white;
-            border: none; border-radius: 30px; font-weight: bold; cursor: pointer;
-            box-shadow: 0 4px 15px rgba(0, 200, 83, 0.4); margin-bottom: 20px;
-        }
-        #start-btn:disabled { background: #555; color: #888; box-shadow: none; }
-
-        /* 切换按钮 */
-        #switch-btn {
-            position: absolute; top: 20px; right: 20px; z-index: 99;
-            background: rgba(255, 255, 255, 0.3); color: white;
-            border: 1px solid rgba(255,255,255,0.5);
+        #hand-ar-video { position: absolute; top: 0; left: 0; width: 100%; height: 100%; object-fit: cover; transform: scaleX(-1); }
+        #hand-ar-canvas { position: absolute; top: 0; left: 0; width: 100%; height: 100%; pointer-events: none; transform: scaleX(-1); }
+        
+        /* 切换模式按钮 */
+        #toggle-mode-btn {
+            position: absolute; top: 20px; left: 20px; z-index: 101;
+            background: rgba(0, 0, 0, 0.6); color: white;
+            border: 1px solid rgba(255,255,255,0.4);
             padding: 8px 15px; border-radius: 20px; font-size: 14px;
-            display: none; backdrop-filter: blur(5px);
+            backdrop-filter: blur(5px); display: block; cursor: pointer;
         }
+
+        /* 手掌 AR 模式的切换摄像头按钮 */
+        #hand-ar-switch-cam-btn {
+            position: absolute; top: 20px; right: 20px; z-index: 101;
+            background: rgba(0, 0, 0, 0.6); color: white;
+            border: 1px solid rgba(255,255,255,0.4);
+            padding: 8px 15px; border-radius: 20px; font-size: 14px;
+            backdrop-filter: blur(5px); display: none; cursor: pointer;
+        }
+        /* 模式选择遮罩 */
+        #mode-overlay {
+            position: absolute; top: 0; left: 0; width: 100%; height: 100%;
+            background: rgba(0,0,0,0.95); z-index: 1000;
+            display: flex; flex-direction: column; align-items: center; justify-content: center;
+            color: white; text-align: center;
+        }
+        #mode-overlay h1 { margin-bottom: 30px; }
+        #mode-overlay button {
+            padding: 15px 30px; margin: 10px; font-size: 16px; border-radius: 25px;
+            border: none; background-color: #007bff; color: white; cursor: pointer;
+            box-shadow: 0 4px 8px rgba(0,0,0,0.2); transition: background-color 0.3s;
+        }
+        #mode-overlay button:hover { background-color: #0056b3; }
+        #mode-overlay button#mode-hand-ar { background-color: #28a745; }
+        #mode-overlay button#mode-hand-ar:hover { background-color: #218838; }
 
         /* 调试日志 */
         #debug-log {
-            position: absolute; bottom: 0; left: 0; width: 100%; height: 150px;
-            background: rgba(0,0,0,0.6); color: #00ff00; font-size: 11px; 
-            padding: 10px; overflow-y: scroll; z-index: 101; pointer-events: none;
-            font-family: monospace; border-top: 1px solid #333;
+            position: absolute; bottom: 0; left: 0; width: 100%; max-height: 120px;
+            background: linear-gradient(to top, rgba(0,0,0,0.9), rgba(0,0,0,0)); 
+            color: #00ff00; font-size: 10px; padding: 10px; 
+            overflow-y: scroll; z-index: 102; pointer-events: none;
+            font-family: monospace;
         }
     </style>
-    
-    <script src="https://cdn.staticfile.org/three.js/r128/three.min.js"></script>
-    <script src="https://cdn.bootcdn.net/ajax/libs/three.js/r128/examples/js/loaders/GLTFLoader.js"></script>
-    
-    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.js"></script>
-    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js"></script>
 </head>
 <body>
 
-    <button id="switch-btn">📷 切换摄像头</button>
-
-    <div id="overlay">
-        <h1>👋 Labubu AR</h1>
-        <div id="loading-status" style="margin: 20px 0; color: #aaa;">连接资源服务器...</div>
-        <button id="start-btn" disabled>加载中...</button>
+    <div id="mode-overlay">
+        <h1>选择 Labubu AR 模式</h1>
+        <p style="margin-bottom: 20px; opacity: 0.8;">请选择你想体验的 AR 方式</p>
+        <button id="mode-ground-ar">🌍 地面固定模式 (更稳定)</button>
+        <button id="mode-hand-ar">✋ 手掌跟随模式 (更互动)</button>
+        <p id="mode-selection-status" style="margin-top: 20px; font-size: 13px; color: #aaa;"></p>
     </div>
 
-    <div id="debug-log">System Init...</div>
-    <video id="input-video" playsinline webkit-playsinline></video>
-    <canvas id="output-canvas"></canvas>
+    <model-viewer 
+        id="ground-ar-viewer"
+        src="https://raw.githubusercontent.com/yannluo/labubu-ar/main/labubu.glb" 
+        ios-src="https://raw.githubusercontent.com/yannluo/labubu-ar/main/labubu.usdz"
+        alt="Labubu 3D 模型"
+        ar
+        ar-modes="scene-viewer webxr quick-look"
+        camera-controls
+        shadow-intensity="1"
+        touch-action="pan-y">
+        <button slot="ar-button" class="ar-button">召唤 Labubu 到现实世界</button>
+        <div slot="progress-bar" style="text-align: center; padding-top: 20px; color: #eee;">正在加载模型...</div>
+    </model-viewer>
+
+    <div id="hand-ar-container">
+        <video id="hand-ar-video" playsinline webkit-playsinline></video>
+        <canvas id="hand-ar-canvas"></canvas>
+        <button id="hand-ar-switch-cam-btn">📷 切到后置</button>
+    </div>
+
+    <div id="debug-log">System Ready.</div>
 
     <script>
+        // --- 日志工具 ---
         function log(msg) {
             const logDiv = document.getElementById('debug-log');
             const time = new Date().toTimeString().split(' ')[0];
             logDiv.innerHTML = `[${time}] ${msg}<br>` + logDiv.innerHTML;
+            logDiv.scrollTop = 0; // 保持最新日志在顶部
             console.log(msg);
         }
 
-        let scene, camera, renderer, labubuGroup;
-        let hands, cameraUtils;
-        let isFrontCamera = true;
-        let isRunning = false;
+        // --- 全局变量 ---
+        let scene, camera, renderer, labubuGroupHand; // 用于手掌AR
+        let hands, cameraUtils; // 用于手掌AR
+        let isFrontCameraHand = true; // 手掌AR模式下的摄像头状态
+        let isHandARRunning = false; // 标识手掌AR是否已启动
 
-        const startBtn = document.getElementById('start-btn');
-        const switchBtn = document.getElementById('switch-btn');
-        const statusDiv = document.getElementById('loading-status');
-        const videoElement = document.getElementById('input-video');
-        const canvasElement = document.getElementById('output-canvas');
+        const modeOverlay = document.getElementById('mode-overlay');
+        const modeGroundArBtn = document.getElementById('mode-ground-ar');
+        const modeHandArBtn = document.getElementById('mode-hand-ar');
+        const modeSelectionStatus = document.getElementById('mode-selection-status');
 
-        // 1. 资源检测
-        window.onload = function() {
-            log("页面载入。检查依赖...");
-            let missing = [];
-            if (typeof THREE === 'undefined') missing.push("Three.js");
-            if (typeof Hands === 'undefined') missing.push("MediaPipe");
+        const groundArViewer = document.getElementById('ground-ar-viewer');
+        const handArContainer = document.getElementById('hand-ar-container');
+        const handArVideo = document.getElementById('hand-ar-video');
+        const handArCanvas = document.getElementById('hand-ar-canvas');
+        const handArSwitchCamBtn = document.getElementById('hand-ar-switch-cam-btn');
 
-            if (missing.length > 0) {
-                log(`❌ 缺失库: ${missing.join(', ')}`);
-                statusDiv.innerText = "资源加载失败，请尝试刷新";
-                statusDiv.style.color = "red";
-            } else {
-                log("✅ 所有库加载成功 (国内源)");
-                startBtn.disabled = false;
-                startBtn.innerText = "点击开始体验";
-                statusDiv.innerText = "准备就绪";
+        // --- 模式选择处理 ---
+        modeGroundArBtn.addEventListener('click', () => {
+            modeOverlay.style.display = 'none';
+            groundArViewer.style.display = 'block';
+            log("选择了地面固定 AR 模式。");
+            modeSelectionStatus.innerText = "请点击下方红色按钮召唤 Labubu";
+            checkGroundARSupport();
+        });
+
+        modeHandArBtn.addEventListener('click', () => {
+            modeOverlay.style.display = 'none';
+            handArContainer.style.display = 'block';
+            log("选择了手掌跟随 AR 模式。");
+            initHandAR();
+        });
+
+        // --- 检查 WebXR 支持性 ---
+        function checkGroundARSupport() {
+            if (groundArViewer.classList.contains('webxr-error')) {
+                modeSelectionStatus.innerText = "当前设备不支持地面 AR，建议切换到手掌跟随模式。";
+                modeSelectionStatus.style.color = 'orange';
+            } else if (!groundArViewer.has<ctrl61>Attribute('ar')) {
+                modeSelectionStatus.innerText = "model-viewer 初始化中...";
             }
-        };
+        }
+        
+        // model-viewer 加载完成事件
+        groundArViewer.addEventListener('ar-status', (event) => {
+            if (event.detail.status === 'not-supported') {
+                log("WebXR (地面 AR) 不受当前设备/浏览器支持。");
+                modeGroundArBtn.disabled = true;
+                modeGroundArBtn.innerText = "不支持地面 AR";
+                modeGroundArBtn.style.backgroundColor = '#6c757d';
+                modeSelectionStatus.innerText = "当前设备不支持地面 AR，建议选择手掌跟随模式。";
+                groundArViewer.classList.add('webxr-error'); // 标记为不支持
+            } else if (event.detail.status === 'failed') {
+                log("WebXR 启动失败：" + event.detail.error);
+                modeSelectionStatus.innerText = "地面 AR 启动失败，可能需要更新系统或浏览器。";
+                modeSelectionStatus.style.color = 'red';
+            } else if (event.detail.status === 'ready') {
+                log("WebXR (地面 AR) 准备就绪。");
+                modeSelectionStatus.innerText = "请点击下方红色按钮，将 Labubu 放置到现实空间。";
+            }
+        });
 
-        // 2. 启动流程
-        async function startApp() {
-            startBtn.disabled = true;
-            statusDiv.innerText = "正在初始化 3D 引擎...";
-            
+        // --- 手掌跟随 AR 初始化和运行逻辑 ---
+        async function initHandAR() {
+            if (isHandARRunning) return; // 防止重复初始化
+
+            log(">>> 启动手掌跟随 AR 模式");
+            const loadingText = document.createElement('div');
+            loadingText.id = 'hand-ar-loading';
+            loadingText.style.cssText = `
+                position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%);
+                color: white; font-size: 16px; text-align: center; z-index: 103;
+            `;
+            loadingText.innerText = "正在加载 AI 模型和启动摄像头...";
+            handArContainer.appendChild(loadingText);
+
             try {
-                // 分步执行并打印日志，看看到底卡在哪一步
-                log(">>> 开始初始化 Three.js");
-                
-                if (!canvasElement) throw new Error("找不到 Canvas 元素");
-                
-                log("1. 创建场景...");
+                // 初始化 Three.js
+                log("1. 初始化 3D 场景...");
+                const canvasCtx = handArCanvas.getContext('2d');
                 scene = new THREE.Scene();
-                
-                log("2. 创建相机...");
                 camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 1000);
                 camera.position.z = 5;
-                
-                log("3. 创建渲染器 (WebGL)...");
-                // 增加 failIfMajorPerformanceCaveat 避免某些手机卡死
-                renderer = new THREE.WebGLRenderer({ 
-                    canvas: canvasElement, 
-                    alpha: true, 
-                    antialias: true,
-                    failIfMajorPerformanceCaveat: false
-                });
+                renderer = new THREE.WebGLRenderer({ canvas: handArCanvas, alpha: true, antialias: true, failIfMajorPerformanceCaveat: false });
                 renderer.setSize(window.innerWidth, window.innerHeight);
                 renderer.setPixelRatio(window.devicePixelRatio);
-                log("✅ 渲染器创建成功");
-
-                log("4. 添加灯光...");
                 scene.add(new THREE.AmbientLight(0xffffff, 0.8));
                 const dirLight = new THREE.DirectionalLight(0xffffff, 1);
                 dirLight.position.set(5, 10, 7);
                 scene.add(dirLight);
 
-                log("5. 创建模型组...");
-                labubuGroup = new THREE.Group();
-                scene.add(labubuGroup);
-
-                // 测试方块
-                const geometry = new THREE.BoxGeometry(1.5, 1.5, 1.5);
-                const material = new THREE.MeshNormalMaterial();
-                const cube = new THREE.Mesh(geometry, material);
-                labubuGroup.add(cube);
-                labubuGroup.visible = false; 
-                log("✅ 3D 初始化完成！");
-
-                // 初始化 AI
-                statusDiv.innerText = "正在启动 AI...";
-                initMediaPipe();
+                log("2. 加载 Labubu 模型...");
+                labubuGroupHand = new THREE.Group();
+                scene.add(labubuGroupHand);
                 
-                // 启动相机
-                statusDiv.innerText = "请求摄像头...";
-                await startCamera('user');
+                // 使用默认的 Labubu 模型 (注意：这是我放到 GitHub 上的 GLB 文件，确保路径可访问)
+                const loader = new THREE.GLTFLoader();
+                loader.load('https://raw.githubusercontent.com/yannluo/labubu-ar/main/labubu.glb', (gltf) => {
+                    const model = gltf.scene;
+                    model.scale.set(0.2, 0.2, 0.2); // 调整大小，让它能放在手上
+                    model.position.y = -0.5; // 稍微往下移，看起来坐在手掌中央
+                    labubuGroupHand.add(model);
+                    labubuGroupHand.visible = false; // 默认隐藏
+                    log("✅ Labubu 模型加载成功");
+                }, undefined, (error) => {
+                    log("❌ Labubu 模型加载失败: " + error);
+                    loadingText.innerText = "模型加载失败，请检查网络。";
+                });
+                
+                // 初始化 MediaPipe
+                log("3. 初始化 AI 视觉...");
+                hands = new Hands({locateFile: (file) => `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${file}`});
+                hands.setOptions({
+                    maxNumHands: 1,
+                    modelComplexity: 0, // Lite 模型提高速度
+                    minDetectionConfidence: 0.5,
+                    minTrackingConfidence: 0.5
+                });
+                hands.onResults(onHandARResults);
 
-                // 全部成功
-                document.getElementById('overlay').style.display = 'none';
-                switchBtn.style.display = 'block';
-                isRunning = true;
+                // 启动摄像头
+                log("4. 启动摄像头...");
+                await startHandCamera('user');
+                
+                isHandARRunning = true;
+                handArContainer.removeChild(loadingText);
+                handArSwitchCamBtn.style.display = 'block'; // 显示切换按钮
+                log("✅ 手掌 AR 模式启动成功！伸出手试试。");
 
             } catch (e) {
-                log(`❌ 崩溃: ${e.message}`);
-                statusDiv.innerText = "报错了: " + e.message;
-                statusDiv.style.color = "red";
-                startBtn.disabled = false;
-                alert("初始化失败: " + e.message);
+                log("❌ 手掌 AR 启动失败: " + e.message);
+                loadingText.innerText = "启动失败: " + e.message + "。请刷新重试。";
             }
         }
 
-        function initMediaPipe() {
-            log(">>> 初始化 MediaPipe");
-            hands = new Hands({locateFile: (file) => {
-                // 这是一个比较稳定的源
-                return `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${file}`;
-            }});
-            hands.setOptions({
-                maxNumHands: 1,
-                modelComplexity: 0, // 改为 0 (Lite模型) 提高速度，减少卡顿
-                minDetectionConfidence: 0.5,
-                minTrackingConfidence: 0.5
-            });
-            hands.onResults(onResults);
-        }
-
-        async function startCamera(facingMode) {
-            log(`>>> 启动相机: ${facingMode}`);
-            if (cameraUtils) await cameraUtils.stop();
-
-            if (facingMode === 'user') {
-                videoElement.style.transform = "scaleX(-1)";
-                canvasElement.style.transform = "scaleX(-1)";
-            } else {
-                videoElement.style.transform = "scaleX(1)";
-                canvasElement.style.transform = "scaleX(1)";
+        // 启动手掌 AR 模式的摄像头
+        async function startHandCamera(facingMode) {
+            log(`启动手掌AR摄像头: ${facingMode}`);
+            if (cameraUtils) {
+                await cameraUtils.stop();
             }
 
-            cameraUtils = new Camera(videoElement, {
+            // 调整镜像CSS
+            handArVideo.style.transform = (facingMode === 'user') ? "scaleX(-1)" : "scaleX(1)";
+            handArCanvas.style.transform = (facingMode === 'user') ? "scaleX(-1)" : "scaleX(1)";
+            
+            cameraUtils = new Camera(handArVideo, {
                 onFrame: async () => {
-                    await hands.send({image: videoElement});
+                    await hands.send({image: handArVideo});
                 },
                 width: 1280,
                 height: 720,
                 facingMode: facingMode
             });
             await cameraUtils.start();
-            log("✅ 相机流已获取");
+            log("✅ 手掌AR摄像头流获取成功");
         }
 
-        switchBtn.addEventListener('click', async () => {
-            if (!isRunning) return;
-            switchBtn.disabled = true;
-            switchBtn.innerText = "...";
-            isFrontCamera = !isFrontCamera;
-            try {
-                await startCamera(isFrontCamera ? 'user' : 'environment');
-            } catch(e) { log("切换失败" + e); }
-            switchBtn.disabled = false;
-            switchBtn.innerText = isFrontCamera ? "📷 切到后置" : "📷 切到前置";
-        });
+        // 手掌 AR 模式的渲染循环
+        function onHandARResults(results) {
+            if (!renderer || !labubuGroupHand || !camera) return;
 
-        function onResults(results) {
-            if (!renderer || !labubuGroup) return;
-
-            // 清空画布
-            renderer.clear(); 
-            // 注意：这里只渲染3D，背景由video标签负责，不再用canvas drawImage，提高性能
+            // MediaPipe 内部会渲染背景视频到 videoElement，我们不需要在 canvas 绘制
+            // renderer 只负责渲染 3D 模型
 
             if (results.multiHandLandmarks && results.multiHandLandmarks.length > 0) {
                 const landmarks = results.multiHandLandmarks[0];
-                const palmX = landmarks[9].x; 
-                const palmY = landmarks[9].y;
-                update3DPosition(palmX, palmY, landmarks);
-                labubuGroup.visible = true;
+                const wrist = landmarks[0]; // 手腕
+                const middleFingerBase = landmarks[9]; // 中指根部
+
+                // 使用手腕和中指根部来定位手掌中心
+                const handCenterX = (wrist.x + middleFingerBase.x) / 2;
+                const handCenterY = (wrist.y + middleFingerBase.y) / 2;
+                
+                updateLabubuPositionOnHand(handCenterX, handCenterY, landmarks);
+                labubuGroupHand.visible = true;
+
             } else {
-                labubuGroup.visible = false;
+                labubuGroupHand.visible = false;
             }
             renderer.render(scene, camera);
         }
 
-        function update3DPosition(x, y, landmarks) {
+        // 更新 Labubu 在手上的位置和旋转
+        function updateLabubuPositionOnHand(x, y, landmarks) {
             const vec = new THREE.Vector3();
-            vec.set((x * 2) - 1, -(y * 2) + 1, 0.5);
-            vec.unproject(camera);
+            vec.set((x * 2) - 1, -(y * 2) + 1, 0.5); // 屏幕坐标转 NDC
+            vec.unproject(camera); // NDC 转世界坐标
             vec.sub(camera.position).normalize();
             
+            // 深度估算：根据手掌大小调整 Z 轴深度
             const dx = landmarks[0].x - landmarks[9].x;
             const dy = landmarks[0].y - landmarks[9].y;
-            const dist = Math.sqrt(dx*dx + dy*dy);
+            const handSize = Math.sqrt(dx*dx + dy*dy); // 手腕到中指根的距离
+            const depthFactor = isFrontCameraHand ? 5 : 8; // 前置/后置深度系数
+            const zDepth = 1 / (handSize * depthFactor) * 2; // 调整乘数让模型近一点
+
+            const dir = vec.multiplyScalar(zDepth);
+            labubuGroupHand.position.copy(camera.position).add(dir);
+
+            // 让模型跟随手掌的旋转
+            // 可以通过手腕（0）和食指根部（5）来计算手的左右倾斜
+            const wrist = landmarks[0];
+            const indexFingerBase = landmarks[5];
+            const handAngle = Math.atan2(indexFingerBase.y - wrist.y, indexFingerBase.x - wrist.x);
             
-            const depthFactor = isFrontCamera ? 5 : 8;
-            const zDepth = 1 / (dist * depthFactor); 
-            
-            var dir = vec.multiplyScalar(zDepth);
-            labubuGroup.position.copy(camera.position).add(dir);
-            labubuGroup.rotation.x += 0.02;
-            labubuGroup.rotation.y += 0.02;
+            // 简单的模型旋转，让它看起来坐得更稳
+            labubuGroupHand.rotation.z = handAngle + Math.PI / 2; // +90度让模型头部朝上
+            labubuGroupHand.rotation.x = -Math.PI / 8; // 稍微往前倾一点
         }
 
-        startBtn.addEventListener('click', startApp);
-        
+        // 手掌 AR 模式下的切换摄像头按钮
+        handArSwitchCamBtn.addEventListener('click', async () => {
+            if (!isHandARRunning) return;
+            handArSwitchCamBtn.disabled = true;
+            handArSwitchCamBtn.innerText = "切换中...";
+            isFrontCameraHand = !isFrontCameraHand;
+            try {
+                await startHandCamera(isFrontCameraHand ? 'user' : 'environment');
+            } catch(e) { log("手掌AR摄像头切换失败: " + e); }
+            handArSwitchCamBtn.disabled = false;
+            handArSwitchCamBtn.innerText = isFrontCameraHand ? "📷 切到后置" : "📷 切到前置";
+        });
+
+        // 窗口大小改变时重置
         window.addEventListener('resize', () => {
             if(camera && renderer) {
                 camera.aspect = window.innerWidth / window.innerHeight;

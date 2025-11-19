@@ -1,0 +1,222 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+    <title>Labubu 手掌 AR (修复版)</title>
+    <style>
+        body { margin: 0; padding: 0; overflow: hidden; background-color: #000; font-family: sans-serif; }
+        
+        /* 视频层 & Canvas层 */
+        #input-video { position: absolute; top: 0; left: 0; width: 100%; height: 100%; object-fit: cover; z-index: 1; opacity: 1; }
+        #output-canvas { position: absolute; top: 0; left: 0; width: 100%; height: 100%; z-index: 2; }
+        
+        /* 启动界面容器 */
+        #overlay {
+            position: absolute; top: 0; left: 0; width: 100%; height: 100%;
+            background: rgba(0,0,0,0.8); z-index: 100;
+            display: flex; flex-direction: column; align-items: center; justify-content: center;
+            color: white;
+        }
+
+        /* 启动按钮 */
+        #start-btn {
+            padding: 15px 30px; font-size: 18px; background: #ff5959; color: white;
+            border: none; border-radius: 25px; font-weight: bold; cursor: pointer;
+            box-shadow: 0 4px 10px rgba(255, 89, 89, 0.5);
+            margin-bottom: 20px;
+        }
+
+        /* 调试日志 (显示报错信息) */
+        #debug-log {
+            position: absolute; bottom: 0; left: 0; width: 100%; max-height: 150px;
+            background: rgba(0,0,0,0.5); color: lime; font-size: 12px;
+            padding: 10px; overflow-y: scroll; z-index: 101; pointer-events: none;
+            box-sizing: border-box;
+        }
+    </style>
+    
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/gh/mrdoob/three.js@r128/examples/js/loaders/GLTFLoader.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js"></script>
+</head>
+<body>
+
+    <div id="overlay">
+        <h2>👋 Labubu AR</h2>
+        <p style="margin-bottom: 20px; opacity: 0.8;">请确保在明亮的环境下使用</p>
+        <button id="start-btn">点击开始体验</button>
+        <div id="status-text" style="margin-top: 15px; font-size: 14px; color: #aaa;">等待操作...</div>
+    </div>
+
+    <div id="debug-log">System Ready.</div>
+
+    <video id="input-video" playsinline webkit-playsinline></video>
+    <canvas id="output-canvas"></canvas>
+
+    <script>
+        // --- 日志辅助函数 (把报错打在屏幕上) ---
+        function log(msg) {
+            console.log(msg);
+            const logDiv = document.getElementById('debug-log');
+            const time = new Date().toTimeString().split(' ')[0];
+            logDiv.innerHTML = `[${time}] ${msg}<br>` + logDiv.innerHTML;
+        }
+        
+        window.onerror = function(msg, source, lineno) {
+            log(`❌ Error: ${msg} (Line ${lineno})`);
+        }
+
+        const videoElement = document.getElementById('input-video');
+        const canvasElement = document.getElementById('output-canvas');
+        const canvasCtx = canvasElement.getContext('2d');
+        const startBtn = document.getElementById('start-btn');
+        const statusText = document.getElementById('status-text');
+        const overlay = document.getElementById('overlay');
+
+        // --- Three.js 初始化 ---
+        let scene, camera, renderer, labubuGroup;
+
+        function initThreeJS() {
+            try {
+                log("正在初始化 3D 引擎...");
+                scene = new THREE.Scene();
+                camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 1000);
+                camera.position.z = 5;
+
+                renderer = new THREE.WebGLRenderer({ canvas: canvasElement, alpha: true, antialias: true });
+                renderer.setSize(window.innerWidth, window.innerHeight);
+                renderer.setPixelRatio(window.devicePixelRatio);
+
+                const ambientLight = new THREE.AmbientLight(0xffffff, 0.8);
+                scene.add(ambientLight);
+                const dirLight = new THREE.DirectionalLight(0xffffff, 1);
+                dirLight.position.set(5, 10, 7);
+                scene.add(dirLight);
+
+                labubuGroup = new THREE.Group();
+                scene.add(labubuGroup);
+
+                // >>> 红方块测试体 <<<
+                const geometry = new THREE.BoxGeometry(1.5, 2, 1);
+                const material = new THREE.MeshLambertMaterial({ color: 0xff5959 });
+                const cube = new THREE.Mesh(geometry, material);
+                labubuGroup.add(cube);
+                labubuGroup.visible = false;
+
+                log("3D 引擎准备就绪");
+            } catch (e) {
+                log("❌ ThreeJS 初始化失败: " + e.message);
+            }
+        }
+
+        // --- MediaPipe 初始化 ---
+        let hands, cameraUtils;
+
+        function initMediaPipe() {
+            log("正在加载 AI 模型 (文件较大请耐心等待)...");
+            statusText.innerText = "正在下载 AI 模型 (约 10MB)...";
+
+            hands = new Hands({locateFile: (file) => {
+                return `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${file}`;
+            }});
+
+            hands.setOptions({
+                maxNumHands: 1,
+                modelComplexity: 1,
+                minDetectionConfidence: 0.5,
+                minTrackingConfidence: 0.5
+            });
+
+            hands.onResults(onResults);
+            log("AI 模型配置完成");
+        }
+
+        function onResults(results) {
+            // 一旦有结果返回，说明跑通了，隐藏遮罩
+            if (overlay.style.display !== 'none') {
+                overlay.style.display = 'none';
+                log("✅ 视觉系统运行中！请伸出手。");
+            }
+
+            canvasCtx.save();
+            canvasCtx.clearRect(0, 0, canvasElement.width, canvasElement.height);
+            // 注意：这里不再绘制 image 到 canvas，因为 video 已经在底层显示了，为了节省性能
+            
+            if (results.multiHandLandmarks && results.multiHandLandmarks.length > 0) {
+                const landmarks = results.multiHandLandmarks[0];
+                const palmX = landmarks[9].x; // 中指根部
+                const palmY = landmarks[9].y;
+                
+                updateLabubuPosition(palmX, palmY, landmarks);
+                labubuGroup.visible = true;
+            } else {
+                labubuGroup.visible = false;
+            }
+
+            // 渲染 3D
+            renderer.render(scene, camera);
+            canvasCtx.restore();
+        }
+
+        function updateLabubuPosition(x, y, landmarks) {
+            const vec = new THREE.Vector3();
+            const pos = new THREE.Vector3();
+            
+            vec.set((x * 2) - 1, -(y * 2) + 1, 0.5);
+            vec.unproject(camera);
+            vec.sub(camera.position).normalize();
+            
+            const dx = landmarks[0].x - landmarks[9].x;
+            const dy = landmarks[0].y - landmarks[9].y;
+            const distance = Math.sqrt(dx*dx + dy*dy);
+            const zDepth = 1 / (distance * 5); 
+            
+            var dir = vec.multiplyScalar(zDepth);
+            labubuGroup.position.copy(camera.position).add(dir);
+            labubuGroup.lookAt(camera.position);
+        }
+
+        // --- 点击开始流程 ---
+        startBtn.addEventListener('click', async () => {
+            startBtn.disabled = true;
+            startBtn.innerText = "启动中...";
+            statusText.innerText = "正在请求摄像头权限...";
+            
+            initThreeJS();
+            initMediaPipe();
+
+            try {
+                log("尝试启动摄像头...");
+                cameraUtils = new Camera(videoElement, {
+                    onFrame: async () => {
+                        await hands.send({image: videoElement});
+                    },
+                    width: 1280,
+                    height: 720
+                });
+                
+                await cameraUtils.start();
+                log("摄像头启动成功！等待 AI 识别...");
+                statusText.innerText = "摄像头已打开，正在处理画面...";
+                
+            } catch (error) {
+                log("❌ 摄像头启动失败: " + error.message);
+                statusText.innerText = "报错了，请查看下方日志";
+                alert("无法打开摄像头，请确保在设置中允许浏览器访问相机，并使用 HTTPS 链接。");
+                startBtn.disabled = false;
+                startBtn.innerText = "重试";
+            }
+        });
+
+        window.addEventListener('resize', () => {
+            if(camera) {
+                camera.aspect = window.innerWidth / window.innerHeight;
+                camera.updateProjectionMatrix();
+                renderer.setSize(window.innerWidth, window.innerHeight);
+            }
+        });
+    </script>
+</body>
+</html>
